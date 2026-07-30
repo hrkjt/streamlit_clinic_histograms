@@ -18,6 +18,7 @@ st.set_page_config(
 
 
 ID_COLUMN = "ダミーID"
+DATE_COLUMN = "診察日"
 CLINIC_ORDER = ["日本橋", "関西", "表参道", "福岡"]
 CLINIC_BY_PREFIX = {
     "T": "日本橋",
@@ -124,6 +125,26 @@ def build_treatment_ids(data: dict[str, Any]) -> set[str]:
     return treated_ids
 
 
+def build_patient_dates(data: dict[str, Any]) -> pd.DataFrame:
+    patients = drop_invalid_dummy_id(pd.DataFrame(data.get("患者数", [])))
+    if patients.empty or DATE_COLUMN not in patients.columns:
+        return pd.DataFrame(columns=[ID_COLUMN, DATE_COLUMN])
+
+    patients = patients[[ID_COLUMN, DATE_COLUMN]].copy()
+    patients[ID_COLUMN] = patients[ID_COLUMN].astype(str).str.strip()
+    patients[DATE_COLUMN] = pd.to_datetime(
+        patients[DATE_COLUMN].astype("string"),
+        format="mixed",
+        errors="coerce",
+        cache=False,
+    )
+    return (
+        patients.dropna(subset=[DATE_COLUMN])
+        .sort_values(DATE_COLUMN)
+        .drop_duplicates(ID_COLUMN, keep="first")
+    )
+
+
 def prepare_analysis_df(data: dict[str, Any]) -> pd.DataFrame:
     df = normalize_progress(data)
     if df.empty:
@@ -131,6 +152,9 @@ def prepare_analysis_df(data: dict[str, Any]) -> pd.DataFrame:
 
     treated_ids = build_treatment_ids(data)
     df["治療有無"] = np.where(df[ID_COLUMN].isin(treated_ids), "治療あり", "治療なし")
+    patient_dates = build_patient_dates(data)
+    if not patient_dates.empty:
+        df = df.merge(patient_dates, on=ID_COLUMN, how="left")
 
     for parameter, (lower, upper) in OUTLIER_LIMITS.items():
         if parameter in df.columns:
@@ -164,25 +188,59 @@ def make_histogram_figure(df: pd.DataFrame, parameter: str, clinics: list[str], 
     if bins.size == 0:
         return fig
 
-    xbins = dict(start=float(bins[0]), end=float(bins[-1]), size=float(bins[1] - bins[0]))
+    bin_width = float(bins[1] - bins[0])
+    centers = bins[:-1] + bin_width / 2
     for row, clinic in enumerate(clinics, start=1):
         clinic_df = df[df["クリニック"] == clinic]
+        counts_by_treatment: dict[str, np.ndarray] = {}
         for treatment in TREATMENT_ORDER:
             values = clinic_df[clinic_df["治療有無"] == treatment][parameter].dropna()
+            counts, _ = np.histogram(values, bins=bins)
+            counts_by_treatment[treatment] = counts
             fig.add_trace(
-                go.Histogram(
-                    x=values,
-                    xbins=xbins,
+                go.Bar(
+                    x=centers,
+                    y=counts,
+                    width=bin_width * 0.92,
                     name=treatment,
                     marker_color=TREATMENT_COLORS[treatment],
                     legendgroup=treatment,
                     showlegend=row == 1,
                     opacity=0.9,
-                    hovertemplate=f"{clinic}<br>{treatment}<br>{parameter}: %{{x}}<br>人数: %{{y}}<extra></extra>",
+                    customdata=np.stack([bins[:-1], bins[1:]], axis=-1),
+                    hovertemplate=(
+                        f"{clinic}<br>{treatment}<br>"
+                        f"{parameter}: %{{customdata[0]:.2f}}-%{{customdata[1]:.2f}}<br>"
+                        "人数: %{y}<extra></extra>"
+                    ),
                 ),
                 row=row,
                 col=1,
             )
+
+        treated_counts = counts_by_treatment.get("治療あり", np.zeros(len(centers), dtype=int))
+        total_counts = sum(counts_by_treatment.values())
+        rates = np.divide(
+            treated_counts,
+            total_counts,
+            out=np.zeros_like(treated_counts, dtype=float),
+            where=total_counts > 0,
+        )
+        labels = [f"{rate * 100:.0f}%" if total > 0 else "" for rate, total in zip(rates, total_counts)]
+        fig.add_trace(
+            go.Scatter(
+                x=centers,
+                y=total_counts,
+                mode="text",
+                text=labels,
+                textposition="top center",
+                textfont=dict(size=12, color="#111827"),
+                showlegend=False,
+                hoverinfo="skip",
+            ),
+            row=row,
+            col=1,
+        )
 
     fig.update_layout(
         barmode="stack",
@@ -195,7 +253,7 @@ def make_histogram_figure(df: pd.DataFrame, parameter: str, clinics: list[str], 
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
     )
     fig.update_xaxes(title_text=parameter, showgrid=True, gridcolor="#e5e7eb", zeroline=False)
-    fig.update_yaxes(title_text="人数", showgrid=True, gridcolor="#e5e7eb", zeroline=False)
+    fig.update_yaxes(title_text="人数", showgrid=True, gridcolor="#e5e7eb", zeroline=False, rangemode="tozero")
     return fig
 
 
@@ -239,6 +297,16 @@ def main() -> None:
     with st.sidebar:
         st.header("表示設定")
         selected_parameter = st.selectbox("パラメータ", available_parameters, index=available_parameters.index("CVAI") if "CVAI" in available_parameters else 0)
+        if DATE_COLUMN in df.columns and df[DATE_COLUMN].notna().any():
+            date_values = df[DATE_COLUMN].dropna()
+            selected_period = st.date_input(
+                "対象期間",
+                value=(date_values.min().date(), date_values.max().date()),
+                min_value=date_values.min().date(),
+                max_value=date_values.max().date(),
+            )
+        else:
+            selected_period = None
         selected_clinics = st.multiselect("クリニック", available_clinics, default=available_clinics)
         selected_treatment = st.multiselect("治療有無", TREATMENT_ORDER, default=TREATMENT_ORDER)
         bin_count = st.slider("bin数", min_value=5, max_value=50, value=20, step=1)
@@ -249,6 +317,11 @@ def main() -> None:
         & df["治療有無"].isin(selected_treatment)
         & df[selected_parameter].notna()
     ].copy()
+    if selected_period and len(selected_period) == 2 and DATE_COLUMN in filtered.columns:
+        start_date, end_date = selected_period
+        filtered = filtered[
+            filtered[DATE_COLUMN].dt.date.between(start_date, end_date)
+        ].copy()
 
     c1, c2, c3 = st.columns(3)
     c1.metric("対象患者", f"{filtered[ID_COLUMN].nunique():,}")
@@ -273,9 +346,9 @@ def main() -> None:
 
     with st.expander("データ確認"):
         st.write("APIキー:", list(data.keys()))
-        st.write("使用列:", [ID_COLUMN, "クリニック", "治療有無", selected_parameter])
+        st.write("使用列:", [ID_COLUMN, DATE_COLUMN, "クリニック", "治療有無", selected_parameter])
         st.dataframe(
-            filtered[[ID_COLUMN, "クリニック", "治療有無", selected_parameter]].head(100),
+            filtered[[column for column in [ID_COLUMN, DATE_COLUMN, "クリニック", "治療有無", selected_parameter] if column in filtered.columns]].head(100),
             width="stretch",
             hide_index=True,
         )
