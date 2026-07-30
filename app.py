@@ -264,19 +264,19 @@ def main() -> None:
 
     st.plotly_chart(
         make_histogram_figure(filtered, selected_parameter, selected_clinics, bin_count),
-        use_container_width=True,
+        width="stretch",
     )
 
     if show_table:
         st.subheader("集計表")
-        st.dataframe(make_summary(filtered, selected_parameter), use_container_width=True, hide_index=True)
+        st.dataframe(make_summary(filtered, selected_parameter), width="stretch", hide_index=True)
 
     with st.expander("データ確認"):
         st.write("APIキー:", list(data.keys()))
         st.write("使用列:", [ID_COLUMN, "クリニック", "治療有無", selected_parameter])
         st.dataframe(
             filtered[[ID_COLUMN, "クリニック", "治療有無", selected_parameter]].head(100),
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
         )
 
