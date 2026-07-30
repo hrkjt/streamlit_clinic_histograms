@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from html import escape
 from typing import Any
 
 import numpy as np
@@ -276,6 +277,110 @@ def make_summary(df: pd.DataFrame, parameter: str) -> pd.DataFrame:
     return grouped
 
 
+def period_label(selected_period: Any) -> str:
+    if isinstance(selected_period, (tuple, list)) and len(selected_period) == 2:
+        start_date, end_date = selected_period
+        return f"{start_date} - {end_date}"
+    return "全期間"
+
+
+def make_export_html(
+    fig: go.Figure,
+    summary: pd.DataFrame,
+    parameter: str,
+    selected_clinics: list[str],
+    selected_treatment: list[str],
+    selected_period: Any,
+    bin_count: int,
+    patient_count: int,
+    treated_count: int,
+    untreated_count: int,
+) -> str:
+    chart_html = fig.to_html(full_html=False, include_plotlyjs=True)
+    summary_html = summary.to_html(index=False, border=0, classes="summary-table")
+    clinics_text = ", ".join(selected_clinics) if selected_clinics else "なし"
+    treatment_text = ", ".join(selected_treatment) if selected_treatment else "なし"
+
+    return f"""<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{escape(parameter)} clinic histogram report</title>
+  <style>
+    body {{
+      margin: 0;
+      padding: 32px;
+      color: #111827;
+      background: #f8fafc;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }}
+    main {{
+      max-width: 1280px;
+      margin: 0 auto;
+      background: #ffffff;
+      padding: 28px;
+      border: 1px solid #e5e7eb;
+      border-radius: 8px;
+    }}
+    h1 {{
+      margin: 0 0 16px;
+      font-size: 24px;
+      letter-spacing: 0;
+    }}
+    .meta {{
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 10px;
+      margin: 16px 0 24px;
+    }}
+    .meta div {{
+      padding: 10px 12px;
+      border: 1px solid #e5e7eb;
+      border-radius: 6px;
+      background: #f9fafb;
+      font-size: 14px;
+    }}
+    .summary-table {{
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 24px;
+      font-size: 14px;
+    }}
+    .summary-table th,
+    .summary-table td {{
+      padding: 8px 10px;
+      border-bottom: 1px solid #e5e7eb;
+      text-align: left;
+    }}
+    .summary-table th {{
+      background: #f3f4f6;
+      font-weight: 700;
+    }}
+  </style>
+</head>
+<body>
+  <main>
+    <h1>クリニック別 パラメータ分布</h1>
+    <div class="meta">
+      <div><strong>パラメータ</strong><br>{escape(parameter)}</div>
+      <div><strong>対象期間</strong><br>{escape(period_label(selected_period))}</div>
+      <div><strong>クリニック</strong><br>{escape(clinics_text)}</div>
+      <div><strong>治療有無</strong><br>{escape(treatment_text)}</div>
+      <div><strong>bin数</strong><br>{bin_count}</div>
+      <div><strong>対象患者</strong><br>{patient_count:,}</div>
+      <div><strong>治療あり</strong><br>{treated_count:,}</div>
+      <div><strong>治療なし</strong><br>{untreated_count:,}</div>
+    </div>
+    {chart_html}
+    <h2>集計表</h2>
+    {summary_html}
+  </main>
+</body>
+</html>
+"""
+
+
 def main() -> None:
     st.title("クリニック別 パラメータ分布")
 
@@ -323,10 +428,14 @@ def main() -> None:
             filtered[DATE_COLUMN].dt.date.between(start_date, end_date)
         ].copy()
 
+    patient_count = int(filtered[ID_COLUMN].nunique())
+    treated_count = int(filtered[filtered["治療有無"] == "治療あり"][ID_COLUMN].nunique())
+    untreated_count = int(filtered[filtered["治療有無"] == "治療なし"][ID_COLUMN].nunique())
+
     c1, c2, c3 = st.columns(3)
-    c1.metric("対象患者", f"{filtered[ID_COLUMN].nunique():,}")
-    c2.metric("治療あり", f"{filtered[filtered['治療有無'] == '治療あり'][ID_COLUMN].nunique():,}")
-    c3.metric("治療なし", f"{filtered[filtered['治療有無'] == '治療なし'][ID_COLUMN].nunique():,}")
+    c1.metric("対象患者", f"{patient_count:,}")
+    c2.metric("治療あり", f"{treated_count:,}")
+    c3.metric("治療なし", f"{untreated_count:,}")
 
     if unknown_count:
         st.caption(f"クリニック不明IDは {unknown_count:,} 件あり、比較対象から除外しています。")
@@ -335,14 +444,33 @@ def main() -> None:
         st.warning("現在のフィルタでは対象データがありません。")
         st.stop()
 
-    st.plotly_chart(
-        make_histogram_figure(filtered, selected_parameter, selected_clinics, bin_count),
-        width="stretch",
+    fig = make_histogram_figure(filtered, selected_parameter, selected_clinics, bin_count)
+    summary = make_summary(filtered, selected_parameter)
+
+    st.plotly_chart(fig, width="stretch")
+
+    export_html = make_export_html(
+        fig=fig,
+        summary=summary,
+        parameter=selected_parameter,
+        selected_clinics=selected_clinics,
+        selected_treatment=selected_treatment,
+        selected_period=selected_period,
+        bin_count=bin_count,
+        patient_count=patient_count,
+        treated_count=treated_count,
+        untreated_count=untreated_count,
+    )
+    st.download_button(
+        "現在の表示をHTMLでダウンロード",
+        data=export_html.encode("utf-8"),
+        file_name=f"clinic_histograms_{selected_parameter}.html",
+        mime="text/html",
     )
 
     if show_table:
         st.subheader("集計表")
-        st.dataframe(make_summary(filtered, selected_parameter), width="stretch", hide_index=True)
+        st.dataframe(summary, width="stretch", hide_index=True)
 
     with st.expander("データ確認"):
         st.write("APIキー:", list(data.keys()))
