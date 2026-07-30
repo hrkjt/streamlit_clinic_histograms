@@ -50,6 +50,13 @@ TREATMENT_COLORS = {
     "治療あり": "#2563eb",
     "治療なし": "#06b6d4",
 }
+CLINIC_COLORS = {
+    "日本橋": "#1f77b4",
+    "関西": "#2ca02c",
+    "表参道": "#ff7f0e",
+    "福岡": "#d62728",
+    "不明": "#6b7280",
+}
 
 
 def get_api_url() -> str:
@@ -177,7 +184,41 @@ def histogram_bins(series: pd.Series, bin_count: int) -> np.ndarray:
     return np.linspace(lower, upper, bin_count + 1)
 
 
-def make_histogram_figure(df: pd.DataFrame, parameter: str, clinics: list[str], bin_count: int) -> go.Figure:
+def kde_density(values: pd.Series, x_grid: np.ndarray) -> np.ndarray:
+    clean_values = pd.to_numeric(values, errors="coerce").dropna().to_numpy(dtype=float)
+    if clean_values.size < 2:
+        return np.array([])
+
+    std = float(np.std(clean_values, ddof=1))
+    if std == 0:
+        return np.array([])
+
+    bandwidth = 1.06 * std * clean_values.size ** (-1 / 5)
+    if bandwidth <= 0:
+        return np.array([])
+
+    scaled = (x_grid[:, None] - clean_values[None, :]) / bandwidth
+    density = np.exp(-0.5 * scaled**2).sum(axis=1) / (
+        clean_values.size * bandwidth * np.sqrt(2 * np.pi)
+    )
+    return density
+
+
+def kde_as_counts(values: pd.Series, x_grid: np.ndarray, bin_width: float) -> np.ndarray:
+    density = kde_density(values, x_grid)
+    sample_count = pd.to_numeric(values, errors="coerce").dropna().size
+    if density.size == 0:
+        return np.array([])
+    return density * sample_count * bin_width
+
+
+def make_histogram_figure(
+    df: pd.DataFrame,
+    parameter: str,
+    clinics: list[str],
+    bin_count: int,
+    show_kde: bool = True,
+) -> go.Figure:
     bins = histogram_bins(df[parameter], bin_count)
     fig = make_subplots(
         rows=len(clinics),
@@ -191,6 +232,7 @@ def make_histogram_figure(df: pd.DataFrame, parameter: str, clinics: list[str], 
 
     bin_width = float(bins[1] - bins[0])
     centers = bins[:-1] + bin_width / 2
+    kde_x = np.linspace(float(bins[0]), float(bins[-1]), 240)
     for row, clinic in enumerate(clinics, start=1):
         clinic_df = df[df["クリニック"] == clinic]
         counts_by_treatment: dict[str, np.ndarray] = {}
@@ -243,6 +285,24 @@ def make_histogram_figure(df: pd.DataFrame, parameter: str, clinics: list[str], 
             col=1,
         )
 
+        if show_kde:
+            kde_y = kde_as_counts(clinic_df[parameter], kde_x, bin_width)
+            if kde_y.size:
+                fig.add_trace(
+                    go.Scatter(
+                        x=kde_x,
+                        y=kde_y,
+                        mode="lines",
+                        name="KDE",
+                        line=dict(color="#111827", width=2),
+                        legendgroup="KDE",
+                        showlegend=row == 1,
+                        hovertemplate=f"{clinic}<br>KDE<br>{parameter}: %{{x:.2f}}<br>推定人数: %{{y:.1f}}<extra></extra>",
+                    ),
+                    row=row,
+                    col=1,
+                )
+
     fig.update_layout(
         barmode="stack",
         bargap=0.05,
@@ -255,6 +315,42 @@ def make_histogram_figure(df: pd.DataFrame, parameter: str, clinics: list[str], 
     )
     fig.update_xaxes(title_text=None, showgrid=True, gridcolor="#e5e7eb", zeroline=False)
     fig.update_yaxes(title_text="人数", showgrid=True, gridcolor="#e5e7eb", zeroline=False, rangemode="tozero")
+    return fig
+
+
+def make_kde_comparison_figure(df: pd.DataFrame, parameter: str, clinics: list[str]) -> go.Figure:
+    bins = histogram_bins(df[parameter], 40)
+    fig = go.Figure()
+    if bins.size == 0:
+        return fig
+
+    x_grid = np.linspace(float(bins[0]), float(bins[-1]), 320)
+    for clinic in clinics:
+        clinic_df = df[df["クリニック"] == clinic]
+        density = kde_density(clinic_df[parameter], x_grid)
+        if density.size == 0:
+            continue
+        fig.add_trace(
+            go.Scatter(
+                x=x_grid,
+                y=density,
+                mode="lines",
+                name=f"{clinic} KDE",
+                line=dict(color=CLINIC_COLORS.get(clinic, "#6b7280"), width=3),
+                hovertemplate=f"{clinic}<br>{parameter}: %{{x:.2f}}<br>密度: %{{y:.4f}}<extra></extra>",
+            )
+        )
+
+    fig.update_layout(
+        height=420,
+        margin=dict(l=40, r=24, t=56, b=48),
+        title=dict(text=f"{parameter}のKDE比較: クリニック別", x=0.02),
+        plot_bgcolor="white",
+        paper_bgcolor="white",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+    )
+    fig.update_xaxes(title_text=None, showgrid=True, gridcolor="#e5e7eb", zeroline=False)
+    fig.update_yaxes(title_text="密度", showgrid=True, gridcolor="#e5e7eb", zeroline=False, rangemode="tozero")
     return fig
 
 
@@ -286,17 +382,25 @@ def period_label(selected_period: Any) -> str:
 
 def make_export_html(
     fig: go.Figure,
+    kde_comparison_fig: go.Figure | None,
     summary: pd.DataFrame,
     parameter: str,
     selected_clinics: list[str],
     selected_treatment: list[str],
     selected_period: Any,
     bin_count: int,
+    show_kde: bool,
     patient_count: int,
     treated_count: int,
     untreated_count: int,
 ) -> str:
     chart_html = fig.to_html(full_html=False, include_plotlyjs=True)
+    kde_chart_html = (
+        "<h2>院別KDE比較</h2>"
+        + kde_comparison_fig.to_html(full_html=False, include_plotlyjs=False)
+        if kde_comparison_fig is not None and len(kde_comparison_fig.data) > 0
+        else ""
+    )
     summary_html = summary.to_html(index=False, border=0, classes="summary-table")
     clinics_text = ", ".join(selected_clinics) if selected_clinics else "なし"
     treatment_text = ", ".join(selected_treatment) if selected_treatment else "なし"
@@ -368,11 +472,13 @@ def make_export_html(
       <div><strong>クリニック</strong><br>{escape(clinics_text)}</div>
       <div><strong>治療有無</strong><br>{escape(treatment_text)}</div>
       <div><strong>bin数</strong><br>{bin_count}</div>
+      <div><strong>KDE</strong><br>{"表示" if show_kde else "非表示"}</div>
       <div><strong>対象患者</strong><br>{patient_count:,}</div>
       <div><strong>治療あり</strong><br>{treated_count:,}</div>
       <div><strong>治療なし</strong><br>{untreated_count:,}</div>
     </div>
     {chart_html}
+    {kde_chart_html}
     <h2>集計表</h2>
     {summary_html}
   </main>
@@ -415,6 +521,8 @@ def main() -> None:
         selected_clinics = st.multiselect("クリニック", available_clinics, default=available_clinics)
         selected_treatment = st.multiselect("治療有無", TREATMENT_ORDER, default=TREATMENT_ORDER)
         bin_count = st.slider("bin数", min_value=5, max_value=50, value=20, step=1)
+        show_kde = st.checkbox("ヒストグラムにKDEを重ねる", value=True)
+        show_kde_comparison = st.checkbox("院別KDE比較を表示", value=True)
         show_table = st.checkbox("集計表を表示", value=True)
 
     filtered = df[
@@ -444,19 +552,28 @@ def main() -> None:
         st.warning("現在のフィルタでは対象データがありません。")
         st.stop()
 
-    fig = make_histogram_figure(filtered, selected_parameter, selected_clinics, bin_count)
+    fig = make_histogram_figure(filtered, selected_parameter, selected_clinics, bin_count, show_kde)
+    kde_comparison_fig = (
+        make_kde_comparison_figure(filtered, selected_parameter, selected_clinics)
+        if show_kde_comparison
+        else None
+    )
     summary = make_summary(filtered, selected_parameter)
 
     st.plotly_chart(fig, width="stretch")
+    if kde_comparison_fig is not None and len(kde_comparison_fig.data) > 0:
+        st.plotly_chart(kde_comparison_fig, width="stretch")
 
     export_html = make_export_html(
         fig=fig,
+        kde_comparison_fig=kde_comparison_fig,
         summary=summary,
         parameter=selected_parameter,
         selected_clinics=selected_clinics,
         selected_treatment=selected_treatment,
         selected_period=selected_period,
         bin_count=bin_count,
+        show_kde=show_kde,
         patient_count=patient_count,
         treated_count=treated_count,
         untreated_count=untreated_count,
