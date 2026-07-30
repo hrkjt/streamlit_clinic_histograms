@@ -318,7 +318,15 @@ def make_histogram_figure(
     return fig
 
 
-def make_kde_comparison_figure(df: pd.DataFrame, parameter: str, clinics: list[str]) -> go.Figure:
+def make_kde_comparison_figure(
+    df: pd.DataFrame,
+    parameter: str,
+    clinics: list[str],
+    treatment_filter: str | None = None,
+) -> go.Figure:
+    if treatment_filter:
+        df = df[df["治療有無"] == treatment_filter].copy()
+
     bins = histogram_bins(df[parameter], 40)
     fig = go.Figure()
     if bins.size == 0:
@@ -337,14 +345,18 @@ def make_kde_comparison_figure(df: pd.DataFrame, parameter: str, clinics: list[s
                 mode="lines",
                 name=f"{clinic} KDE",
                 line=dict(color=CLINIC_COLORS.get(clinic, "#6b7280"), width=3),
-                hovertemplate=f"{clinic}<br>{parameter}: %{{x:.2f}}<br>密度: %{{y:.4f}}<extra></extra>",
+                hovertemplate=(
+                    f"{clinic}<br>{treatment_filter or '全体'} KDE<br>"
+                    f"{parameter}: %{{x:.2f}}<br>密度: %{{y:.4f}}<extra></extra>"
+                ),
             )
         )
 
+    title_suffix = f"{treatment_filter}: " if treatment_filter else ""
     fig.update_layout(
         height=420,
         margin=dict(l=40, r=24, t=56, b=48),
-        title=dict(text=f"{parameter}のKDE比較: クリニック別", x=0.02),
+        title=dict(text=f"{parameter}のKDE比較: {title_suffix}クリニック別", x=0.02),
         plot_bgcolor="white",
         paper_bgcolor="white",
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
@@ -383,6 +395,7 @@ def period_label(selected_period: Any) -> str:
 def make_export_html(
     fig: go.Figure,
     kde_comparison_fig: go.Figure | None,
+    treated_kde_comparison_fig: go.Figure | None,
     summary: pd.DataFrame,
     parameter: str,
     selected_clinics: list[str],
@@ -399,6 +412,12 @@ def make_export_html(
         "<h2>院別KDE比較</h2>"
         + kde_comparison_fig.to_html(full_html=False, include_plotlyjs=False)
         if kde_comparison_fig is not None and len(kde_comparison_fig.data) > 0
+        else ""
+    )
+    treated_kde_chart_html = (
+        "<h2>院別KDE比較（治療あり）</h2>"
+        + treated_kde_comparison_fig.to_html(full_html=False, include_plotlyjs=False)
+        if treated_kde_comparison_fig is not None and len(treated_kde_comparison_fig.data) > 0
         else ""
     )
     summary_html = summary.to_html(index=False, border=0, classes="summary-table")
@@ -479,6 +498,7 @@ def make_export_html(
     </div>
     {chart_html}
     {kde_chart_html}
+    {treated_kde_chart_html}
     <h2>集計表</h2>
     {summary_html}
   </main>
@@ -523,6 +543,7 @@ def main() -> None:
         bin_count = st.slider("bin数", min_value=5, max_value=50, value=20, step=1)
         show_kde = st.checkbox("ヒストグラムにKDEを重ねる", value=True)
         show_kde_comparison = st.checkbox("院別KDE比較を表示", value=True)
+        show_treated_kde_comparison = st.checkbox("院別KDE比較（治療あり）を表示", value=True)
         show_table = st.checkbox("集計表を表示", value=True)
 
     filtered = df[
@@ -558,15 +579,23 @@ def main() -> None:
         if show_kde_comparison
         else None
     )
+    treated_kde_comparison_fig = (
+        make_kde_comparison_figure(filtered, selected_parameter, selected_clinics, "治療あり")
+        if show_treated_kde_comparison
+        else None
+    )
     summary = make_summary(filtered, selected_parameter)
 
     st.plotly_chart(fig, width="stretch")
     if kde_comparison_fig is not None and len(kde_comparison_fig.data) > 0:
         st.plotly_chart(kde_comparison_fig, width="stretch")
+    if treated_kde_comparison_fig is not None and len(treated_kde_comparison_fig.data) > 0:
+        st.plotly_chart(treated_kde_comparison_fig, width="stretch")
 
     export_html = make_export_html(
         fig=fig,
         kde_comparison_fig=kde_comparison_fig,
+        treated_kde_comparison_fig=treated_kde_comparison_fig,
         summary=summary,
         parameter=selected_parameter,
         selected_clinics=selected_clinics,
