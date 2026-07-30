@@ -183,7 +183,7 @@ def make_histogram_figure(df: pd.DataFrame, parameter: str, clinics: list[str], 
         rows=len(clinics),
         cols=1,
         shared_xaxes=True,
-        vertical_spacing=0.06,
+        vertical_spacing=0.07,
         subplot_titles=clinics,
     )
     if bins.size == 0:
@@ -253,7 +253,7 @@ def make_histogram_figure(df: pd.DataFrame, parameter: str, clinics: list[str], 
         paper_bgcolor="white",
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
     )
-    fig.update_xaxes(title_text=parameter, showgrid=True, gridcolor="#e5e7eb", zeroline=False)
+    fig.update_xaxes(title_text=None, showgrid=True, gridcolor="#e5e7eb", zeroline=False)
     fig.update_yaxes(title_text="人数", showgrid=True, gridcolor="#e5e7eb", zeroline=False, rangemode="tozero")
     return fig
 
