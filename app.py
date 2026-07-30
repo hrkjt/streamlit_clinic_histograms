@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from html import escape
 from typing import Any
@@ -392,11 +393,23 @@ def period_label(selected_period: Any) -> str:
     return "全期間"
 
 
+def make_export_records(df: pd.DataFrame) -> list[dict[str, Any]]:
+    export_columns = [DATE_COLUMN, "クリニック", "治療有無"] + [
+        column for column in PARAMETERS if column in df.columns
+    ]
+    export_df = df[export_columns].copy()
+    if DATE_COLUMN in export_df.columns:
+        export_df[DATE_COLUMN] = export_df[DATE_COLUMN].dt.strftime("%Y-%m-%d")
+    return json.loads(export_df.to_json(orient="records", force_ascii=False))
+
+
 def make_export_html(
     fig: go.Figure,
     kde_comparison_fig: go.Figure | None,
     treated_kde_comparison_fig: go.Figure | None,
     summary: pd.DataFrame,
+    export_records: list[dict[str, Any]],
+    available_parameters: list[str],
     parameter: str,
     selected_clinics: list[str],
     selected_treatment: list[str],
@@ -423,6 +436,15 @@ def make_export_html(
     summary_html = summary.to_html(index=False, border=0, classes="summary-table")
     clinics_text = ", ".join(selected_clinics) if selected_clinics else "なし"
     treatment_text = ", ".join(selected_treatment) if selected_treatment else "なし"
+    records_json = json.dumps(export_records, ensure_ascii=False, allow_nan=False)
+    parameters_json = json.dumps(available_parameters, ensure_ascii=False)
+    clinics_json = json.dumps(selected_clinics, ensure_ascii=False)
+    treatment_json = json.dumps(selected_treatment, ensure_ascii=False)
+    default_period_json = json.dumps(
+        list(selected_period) if isinstance(selected_period, (tuple, list)) and len(selected_period) == 2 else [],
+        ensure_ascii=False,
+        default=str,
+    )
 
     return f"""<!doctype html>
 <html lang="ja">
@@ -433,23 +455,70 @@ def make_export_html(
   <style>
     body {{
       margin: 0;
-      padding: 32px;
       color: #111827;
       background: #f8fafc;
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     }}
-    main {{
-      max-width: 1280px;
-      margin: 0 auto;
+    .app-shell {{
+      display: grid;
+      grid-template-columns: 280px minmax(0, 1fr);
+      min-height: 100vh;
+    }}
+    aside {{
+      position: sticky;
+      top: 0;
+      height: 100vh;
+      overflow: auto;
+      padding: 20px;
+      border-right: 1px solid #e5e7eb;
       background: #ffffff;
+    }}
+    main {{
+      min-width: 0;
       padding: 28px;
-      border: 1px solid #e5e7eb;
-      border-radius: 8px;
     }}
     h1 {{
       margin: 0 0 16px;
       font-size: 24px;
       letter-spacing: 0;
+    }}
+    h2 {{
+      margin-top: 28px;
+      font-size: 18px;
+    }}
+    label {{
+      display: block;
+      margin: 12px 0 6px;
+      font-size: 13px;
+      font-weight: 700;
+    }}
+    select,
+    input[type="date"],
+    input[type="number"] {{
+      width: 100%;
+      box-sizing: border-box;
+      padding: 7px 8px;
+      border: 1px solid #d1d5db;
+      border-radius: 6px;
+      background: #ffffff;
+    }}
+    .check-row {{
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin: 7px 0;
+      font-size: 14px;
+      font-weight: 400;
+    }}
+    .check-row input {{
+      width: auto;
+    }}
+    .chart-card {{
+      background: #ffffff;
+      border: 1px solid #e5e7eb;
+      border-radius: 8px;
+      padding: 14px;
+      margin-bottom: 18px;
     }}
     .meta {{
       display: grid;
@@ -480,12 +549,40 @@ def make_export_html(
       background: #f3f4f6;
       font-weight: 700;
     }}
+    @media (max-width: 820px) {{
+      .app-shell {{
+        grid-template-columns: 1fr;
+      }}
+      aside {{
+        position: static;
+        height: auto;
+      }}
+    }}
   </style>
 </head>
 <body>
+<div class="app-shell">
+  <aside>
+    <h2>表示設定</h2>
+    <label for="parameterSelect">パラメータ</label>
+    <select id="parameterSelect"></select>
+    <label for="startDate">対象期間</label>
+    <input id="startDate" type="date">
+    <label for="endDate">終了日</label>
+    <input id="endDate" type="date">
+    <label for="binCount">bin数</label>
+    <input id="binCount" type="number" min="5" max="50" step="1" value="{bin_count}">
+    <label>クリニック</label>
+    <div id="clinicControls"></div>
+    <label>治療有無</label>
+    <div id="treatmentControls"></div>
+    <label class="check-row"><input id="showKde" type="checkbox" {"checked" if show_kde else ""}>ヒストグラムにKDEを重ねる</label>
+    <label class="check-row"><input id="showKdeComparison" type="checkbox" checked>院別KDE比較を表示</label>
+    <label class="check-row"><input id="showTreatedKdeComparison" type="checkbox" checked>院別KDE比較（治療あり）を表示</label>
+  </aside>
   <main>
     <h1>クリニック別 パラメータ分布</h1>
-    <div class="meta">
+    <div id="metrics" class="meta">
       <div><strong>パラメータ</strong><br>{escape(parameter)}</div>
       <div><strong>対象期間</strong><br>{escape(period_label(selected_period))}</div>
       <div><strong>クリニック</strong><br>{escape(clinics_text)}</div>
@@ -496,12 +593,302 @@ def make_export_html(
       <div><strong>治療あり</strong><br>{treated_count:,}</div>
       <div><strong>治療なし</strong><br>{untreated_count:,}</div>
     </div>
-    {chart_html}
-    {kde_chart_html}
-    {treated_kde_chart_html}
+    <div style="display:none">{chart_html}</div>
+    <div class="chart-card"><div id="histChart"></div></div>
+    <div id="kdeComparisonWrap" class="chart-card"><div id="kdeComparisonChart"></div></div>
+    <div id="treatedKdeComparisonWrap" class="chart-card"><div id="treatedKdeComparisonChart"></div></div>
     <h2>集計表</h2>
-    {summary_html}
+    <div id="summaryTable">{summary_html}</div>
   </main>
+</div>
+<script>
+const DATA = {records_json};
+const PARAMETERS = {parameters_json};
+const CLINICS = ["日本橋", "関西", "表参道", "福岡"].filter(c => DATA.some(r => r["クリニック"] === c));
+const TREATMENTS = ["治療あり", "治療なし"];
+const DEFAULT_PARAMETER = {json.dumps(parameter, ensure_ascii=False)};
+const DEFAULT_CLINICS = {clinics_json};
+const DEFAULT_TREATMENTS = {treatment_json};
+const DEFAULT_PERIOD = {default_period_json};
+const TREATMENT_COLORS_JS = {{"治療あり":"#2563eb","治療なし":"#06b6d4"}};
+const CLINIC_COLORS_JS = {json.dumps(CLINIC_COLORS, ensure_ascii=False)};
+
+function finiteValues(rows, parameter) {{
+  return rows.map(r => Number(r[parameter])).filter(Number.isFinite);
+}}
+function linspace(start, end, count) {{
+  if (count <= 1) return [start];
+  const step = (end - start) / (count - 1);
+  return Array.from({{length: count}}, (_, i) => start + i * step);
+}}
+function makeBins(values, binCount) {{
+  let min = Math.min(...values);
+  let max = Math.max(...values);
+  if (min === max) {{
+    const pad = Math.max(Math.abs(min) * 0.05, 1);
+    min -= pad;
+    max += pad;
+  }}
+  return linspace(min, max, binCount + 1);
+}}
+function histogram(values, bins) {{
+  const counts = Array(bins.length - 1).fill(0);
+  for (const value of values) {{
+    for (let i = 0; i < bins.length - 1; i++) {{
+      const isLast = i === bins.length - 2;
+      if ((value >= bins[i] && value < bins[i + 1]) || (isLast && value === bins[i + 1])) {{
+        counts[i] += 1;
+        break;
+      }}
+    }}
+  }}
+  return counts;
+}}
+function mean(values) {{
+  return values.reduce((a, b) => a + b, 0) / values.length;
+}}
+function std(values) {{
+  if (values.length < 2) return 0;
+  const m = mean(values);
+  return Math.sqrt(values.reduce((s, v) => s + (v - m) ** 2, 0) / (values.length - 1));
+}}
+function kdeDensity(values, xs) {{
+  if (values.length < 2) return [];
+  const s = std(values);
+  if (!Number.isFinite(s) || s === 0) return [];
+  const bw = 1.06 * s * values.length ** (-1 / 5);
+  if (bw <= 0) return [];
+  const norm = values.length * bw * Math.sqrt(2 * Math.PI);
+  return xs.map(x => values.reduce((sum, v) => sum + Math.exp(-0.5 * ((x - v) / bw) ** 2), 0) / norm);
+}}
+function selectedCheckboxes(name) {{
+  return Array.from(document.querySelectorAll(`input[name="${{name}}"]:checked`)).map(el => el.value);
+}}
+function currentState() {{
+  return {{
+    parameter: document.getElementById("parameterSelect").value,
+    startDate: document.getElementById("startDate").value,
+    endDate: document.getElementById("endDate").value,
+    binCount: Math.max(5, Math.min(50, Number(document.getElementById("binCount").value) || 20)),
+    clinics: selectedCheckboxes("clinic"),
+    treatments: selectedCheckboxes("treatment"),
+    showKde: document.getElementById("showKde").checked,
+    showKdeComparison: document.getElementById("showKdeComparison").checked,
+    showTreatedKdeComparison: document.getElementById("showTreatedKdeComparison").checked,
+  }};
+}}
+function filterRows(state) {{
+  return DATA.filter(r =>
+    state.clinics.includes(r["クリニック"]) &&
+    state.treatments.includes(r["治療有無"]) &&
+    r[state.parameter] !== null &&
+    Number.isFinite(Number(r[state.parameter])) &&
+    (!state.startDate || r["診察日"] >= state.startDate) &&
+    (!state.endDate || r["診察日"] <= state.endDate)
+  );
+}}
+function uniqueCount(rows) {{
+  return rows.length;
+}}
+function renderMetrics(rows, state) {{
+  const treated = rows.filter(r => r["治療有無"] === "治療あり").length;
+  const untreated = rows.filter(r => r["治療有無"] === "治療なし").length;
+  document.getElementById("metrics").innerHTML = `
+    <div><strong>パラメータ</strong><br>${{state.parameter}}</div>
+    <div><strong>対象期間</strong><br>${{state.startDate}} - ${{state.endDate}}</div>
+    <div><strong>クリニック</strong><br>${{state.clinics.join(", ") || "なし"}}</div>
+    <div><strong>治療有無</strong><br>${{state.treatments.join(", ") || "なし"}}</div>
+    <div><strong>bin数</strong><br>${{state.binCount}}</div>
+    <div><strong>KDE</strong><br>${{state.showKde ? "表示" : "非表示"}}</div>
+    <div><strong>対象患者</strong><br>${{uniqueCount(rows).toLocaleString()}}</div>
+    <div><strong>治療あり</strong><br>${{treated.toLocaleString()}}</div>
+    <div><strong>治療なし</strong><br>${{untreated.toLocaleString()}}</div>`;
+}}
+function renderHistogram(rows, state) {{
+  const values = finiteValues(rows, state.parameter);
+  if (!values.length) {{
+    Plotly.react("histChart", [], {{title: "対象データがありません"}});
+    return;
+  }}
+  const bins = makeBins(values, state.binCount);
+  const binWidth = bins[1] - bins[0];
+  const centers = bins.slice(0, -1).map((b, i) => b + binWidth / 2);
+  const traces = [];
+  const annotations = [];
+  const rowCount = state.clinics.length;
+  state.clinics.forEach((clinic, idx) => {{
+    const axisSuffix = idx === 0 ? "" : String(idx + 1);
+    const clinicRows = rows.filter(r => r["クリニック"] === clinic);
+    const countsByTreatment = {{}};
+    TREATMENTS.forEach(treatment => {{
+      const vals = finiteValues(clinicRows.filter(r => r["治療有無"] === treatment), state.parameter);
+      const counts = histogram(vals, bins);
+      countsByTreatment[treatment] = counts;
+      traces.push({{
+        type: "bar",
+        x: centers,
+        y: counts,
+        width: binWidth * 0.92,
+        name: treatment,
+        marker: {{color: TREATMENT_COLORS_JS[treatment]}},
+        legendgroup: treatment,
+        showlegend: idx === 0,
+        xaxis: "x" + axisSuffix,
+        yaxis: "y" + axisSuffix,
+        hovertemplate: `${{clinic}}<br>${{treatment}}<br>${{state.parameter}}: %{{x:.2f}}<br>人数: %{{y}}<extra></extra>`
+      }});
+    }});
+    const total = countsByTreatment["治療あり"].map((_, i) => countsByTreatment["治療あり"][i] + countsByTreatment["治療なし"][i]);
+    const labels = total.map((n, i) => n > 0 ? `${{Math.round(countsByTreatment["治療あり"][i] / n * 100)}}%` : "");
+    traces.push({{
+      type: "scatter",
+      mode: "text",
+      x: centers,
+      y: total,
+      text: labels,
+      textposition: "top center",
+      textfont: {{size: 12, color: "#111827"}},
+      hoverinfo: "skip",
+      showlegend: false,
+      xaxis: "x" + axisSuffix,
+      yaxis: "y" + axisSuffix
+    }});
+    if (state.showKde) {{
+      const kdeX = linspace(bins[0], bins[bins.length - 1], 240);
+      const kdeValues = finiteValues(clinicRows, state.parameter);
+      const kdeY = kdeDensity(kdeValues, kdeX).map(d => d * kdeValues.length * binWidth);
+      if (kdeY.length) {{
+        traces.push({{
+          type: "scatter",
+          mode: "lines",
+          x: kdeX,
+          y: kdeY,
+          name: "KDE",
+          line: {{color: "#111827", width: 2}},
+          legendgroup: "KDE",
+          showlegend: idx === 0,
+          xaxis: "x" + axisSuffix,
+          yaxis: "y" + axisSuffix,
+          hovertemplate: `${{clinic}}<br>KDE<br>${{state.parameter}}: %{{x:.2f}}<br>推定人数: %{{y:.1f}}<extra></extra>`
+        }});
+      }}
+    }}
+    annotations.push({{
+      text: clinic,
+      x: 0.5,
+      xref: "paper",
+      y: 1 - idx / rowCount,
+      yref: "paper",
+      yanchor: "bottom",
+      showarrow: false,
+      font: {{size: 16}}
+    }});
+  }});
+  const layout = {{
+    title: `${{state.parameter}}の分布: クリニック別・治療有無スタック`,
+    grid: {{rows: rowCount, columns: 1, pattern: "independent"}},
+    barmode: "stack",
+    bargap: 0.05,
+    height: Math.max(360, 260 * rowCount),
+    margin: {{l: 48, r: 24, t: 64, b: 48}},
+    plot_bgcolor: "white",
+    paper_bgcolor: "white",
+    annotations
+  }};
+  for (let i = 1; i <= rowCount; i++) {{
+    const suffix = i === 1 ? "" : String(i);
+    layout["xaxis" + suffix] = {{showgrid: true, gridcolor: "#e5e7eb", zeroline: false, title: ""}};
+    layout["yaxis" + suffix] = {{showgrid: true, gridcolor: "#e5e7eb", zeroline: false, title: "人数", rangemode: "tozero"}};
+  }}
+  Plotly.react("histChart", traces, layout, {{responsive: true}});
+}}
+function renderKdeChart(divId, rows, state, treatmentFilter, titlePrefix) {{
+  const sourceRows = treatmentFilter ? rows.filter(r => r["治療有無"] === treatmentFilter) : rows;
+  const values = finiteValues(sourceRows, state.parameter);
+  if (!values.length) {{
+    Plotly.react(divId, [], {{title: "対象データがありません"}});
+    return;
+  }}
+  const bins = makeBins(values, 40);
+  const xs = linspace(bins[0], bins[bins.length - 1], 320);
+  const traces = [];
+  state.clinics.forEach(clinic => {{
+    const clinicRows = sourceRows.filter(r => r["クリニック"] === clinic);
+    const vals = finiteValues(clinicRows, state.parameter);
+    const ys = kdeDensity(vals, xs);
+    if (ys.length) {{
+      traces.push({{
+        type: "scatter",
+        mode: "lines",
+        x: xs,
+        y: ys,
+        name: `${{clinic}} KDE`,
+        line: {{color: CLINIC_COLORS_JS[clinic] || "#6b7280", width: 3}},
+        hovertemplate: `${{clinic}}<br>${{treatmentFilter || "全体"}} KDE<br>${{state.parameter}}: %{{x:.2f}}<br>密度: %{{y:.4f}}<extra></extra>`
+      }});
+    }}
+  }});
+  Plotly.react(divId, traces, {{
+    title: `${{state.parameter}}のKDE比較: ${{titlePrefix}}クリニック別`,
+    height: 420,
+    margin: {{l: 48, r: 24, t: 56, b: 48}},
+    plot_bgcolor: "white",
+    paper_bgcolor: "white",
+    xaxis: {{title: "", showgrid: true, gridcolor: "#e5e7eb", zeroline: false}},
+    yaxis: {{title: "密度", showgrid: true, gridcolor: "#e5e7eb", zeroline: false, rangemode: "tozero"}},
+    legend: {{orientation: "h", yanchor: "bottom", y: 1.02, xanchor: "right", x: 1}}
+  }}, {{responsive: true}});
+}}
+function renderSummary(rows, state) {{
+  const groups = [];
+  state.clinics.forEach(clinic => TREATMENTS.forEach(treatment => {{
+    if (!state.treatments.includes(treatment)) return;
+    const vals = finiteValues(rows.filter(r => r["クリニック"] === clinic && r["治療有無"] === treatment), state.parameter);
+    if (!vals.length) return;
+    vals.sort((a, b) => a - b);
+    const m = mean(vals);
+    const median = vals.length % 2 ? vals[(vals.length - 1) / 2] : (vals[vals.length / 2 - 1] + vals[vals.length / 2]) / 2;
+    groups.push([clinic, treatment, vals.length, m, median, std(vals), vals[0], vals[vals.length - 1]]);
+  }}));
+  const rowsHtml = groups.map(g => `<tr>${{g.map((v, i) => `<td>${{i >= 3 ? Number(v).toFixed(2) : v}}</td>`).join("")}}</tr>`).join("");
+  document.getElementById("summaryTable").innerHTML = `<table class="summary-table"><thead><tr><th>クリニック</th><th>治療有無</th><th>症例数</th><th>平均</th><th>中央値</th><th>標準偏差</th><th>最小</th><th>最大</th></tr></thead><tbody>${{rowsHtml}}</tbody></table>`;
+}}
+function render() {{
+  const state = currentState();
+  const rows = filterRows(state);
+  renderMetrics(rows, state);
+  renderHistogram(rows, state);
+  document.getElementById("kdeComparisonWrap").style.display = state.showKdeComparison ? "block" : "none";
+  document.getElementById("treatedKdeComparisonWrap").style.display = state.showTreatedKdeComparison ? "block" : "none";
+  if (state.showKdeComparison) renderKdeChart("kdeComparisonChart", rows, state, null, "");
+  if (state.showTreatedKdeComparison) renderKdeChart("treatedKdeComparisonChart", rows, state, "治療あり", "治療あり: ");
+  renderSummary(rows, state);
+}}
+function initControls() {{
+  const parameterSelect = document.getElementById("parameterSelect");
+  PARAMETERS.forEach(p => {{
+    const opt = document.createElement("option");
+    opt.value = p;
+    opt.textContent = p;
+    if (p === DEFAULT_PARAMETER) opt.selected = true;
+    parameterSelect.appendChild(opt);
+  }});
+  const dates = DATA.map(r => r["診察日"]).filter(Boolean).sort();
+  const minDate = dates[0];
+  const maxDate = dates[dates.length - 1];
+  document.getElementById("startDate").value = DEFAULT_PERIOD[0] || minDate;
+  document.getElementById("startDate").min = minDate;
+  document.getElementById("startDate").max = maxDate;
+  document.getElementById("endDate").value = DEFAULT_PERIOD[1] || maxDate;
+  document.getElementById("endDate").min = minDate;
+  document.getElementById("endDate").max = maxDate;
+  document.getElementById("clinicControls").innerHTML = CLINICS.map(c => `<label class="check-row"><input name="clinic" type="checkbox" value="${{c}}" ${{DEFAULT_CLINICS.includes(c) ? "checked" : ""}}>${{c}}</label>`).join("");
+  document.getElementById("treatmentControls").innerHTML = TREATMENTS.map(t => `<label class="check-row"><input name="treatment" type="checkbox" value="${{t}}" ${{DEFAULT_TREATMENTS.includes(t) ? "checked" : ""}}>${{t}}</label>`).join("");
+  document.querySelectorAll("select,input").forEach(el => el.addEventListener("change", render));
+  render();
+}}
+initControls();
+</script>
 </body>
 </html>
 """
@@ -597,6 +984,8 @@ def main() -> None:
         kde_comparison_fig=kde_comparison_fig,
         treated_kde_comparison_fig=treated_kde_comparison_fig,
         summary=summary,
+        export_records=make_export_records(df),
+        available_parameters=available_parameters,
         parameter=selected_parameter,
         selected_clinics=selected_clinics,
         selected_treatment=selected_treatment,
